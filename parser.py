@@ -1,68 +1,134 @@
-import requests
-from bs4 import BeautifulSoup
+import argparse
+import os
 import re
-from collections import defaultdict
+import time
+from datetime import datetime
 
+import requests
+import schedule
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 
-def parse_input_file(file_path):
-    """Чтение файла и извлечение URL с группировкой по месяцам."""
-    month_data = defaultdict(list)  # Словарь для хранения данных по месяцам
-    current_month = None
+# Загрузка переменных из .env
+load_dotenv()
 
-    with open(file_path, 'r', encoding='utf-8') as file:
-        for line in file:
-            line = line.strip()
-            if not line:
-                continue
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-            # Проверяем, является ли строка датой (например, "04.2025")
-            if re.match(r'^\d{2}\.\d{4}$', line):
-                current_month = line
-                continue
+if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    raise ValueError("TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID не заданы!")
 
-            # Извлекаем URL из строк вида "[1$] Название: https://example.com"
-            match = re.match(r'^\d+\)\s+\[\d+\$\]\s+.+?:\s+(https?://\S+)', line)
-            if match and current_month:
-                url = match.group(1)
-                month_data[current_month].append(url)
+# Загрузка директории и имени файла
+def parse_args():
+    """Парсинг аргументов командной строки."""
+    parser = argparse.ArgumentParser(description="Парсер страниц с фигурками.")
+    parser.add_argument("-d", "--dir", default=".", help="Директория с файлом данных")
+    parser.add_argument("-f", "--file", default="statues.txt", help="Имя файла с данными")
+    return parser.parse_args()
 
-    return month_data
+args = parse_args()
+input_path = f"{args.dir}/{args.file}"
 
+# --- Чтение файла ---
+def read_input_file():
+    # Читаем ссылки из файла (одна строка — одна ссылка)
+    with open(input_path, "r", encoding="utf-8") as file:
+        urls = [line.strip() for line in file if line.strip()]
 
-def check_product_phase(url):
-    """Проверяет, есть ли на странице фраза 'Product Phase: released'."""
+    return urls
+
+input_data = read_input_file()
+
+# Словарь для хранения последних состояний {url: last_phase}
+product_history = {}
+
+# Отправляем нотификацию мне в ЛС
+def send_telegram_notification(message):
+    """Отправка уведомления в Telegram."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+
+    response = requests.post(url, json=payload)
+    if response.status_code != 200:
+        print(f"Telegram response status code: {response.status_code}, Reason: {response.text}")
+
+# Получаем инфо по фигурке.
+def parse_product_info(url):
+    """Парсит 'Product Phase' и 'Est Released Time' со страницы."""
     try:
         response = requests.get(url, timeout=10)
-        response.raise_for_status()  # Проверка на ошибки HTTP
-
+        response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
-        return "Product Phase: released" in soup.get_text()
+
+        # Ищем блок, содержащий "Product Phase:"
+        phase_block = soup.find(lambda tag: tag.text.strip().startswith("Product Phase:"))
+        if phase_block:
+            phase_text = ' '.join(phase_block.stripped_strings)  # Объединяет текст из всех вложенных тегов
+        else:
+            phase_text = None
+
+        # Аналогично для "Est Released Time:"
+        released_time_block = soup.find(lambda tag: tag.text.strip().startswith("Est Released Time:"))
+        if released_time_block:
+            released_time_text = ' '.join(released_time_block.stripped_strings)
+        else:
+            released_time_text = None
+
+        return {
+            "phase": phase_text,
+            "released_time": released_time_text
+        }
     except Exception as e:
-        print(f"⚠ Ошибка при проверке {url}: {str(e)}")
-        return False
+        print(f"⚠ Ошибка при парсинге {url}: {str(e)}")
+        return None
 
 
-def main():
-    input_file = "input.txt"  # Путь к вашему файлу
-    output_file = "results.txt"
+def check_products():
+    """Основная функция проверки изменений."""
+    print(f"\n🔍 Проверка {datetime.now().strftime('%d.%m %H:%M')}")
 
-    # Парсим входной файл
-    month_data = parse_input_file(input_file)
+    for url in input_data:
+        current_info = parse_product_info(url)
+        if not current_info:
+            continue
 
-    # Проверяем каждый URL и сохраняем результаты
-    with open(output_file, 'w', encoding='utf-8') as f:
-        for month, urls in month_data.items():
-            f.write(f"{month}\n")
-            print(f"🔍 Проверяем месяц: {month}")
+        # Загружаем предыдущие данные (если есть)
+        last_info = product_history.get(url, {})
 
-            for url in urls:
-                is_released = check_product_phase(url)
-                status = "✅ Released" if is_released else "❌ Not Released"
-                f.write(f"{url} - {status}\n")
-                print(f"   {url} - {status}")
+        # Проверяем изменения
+        phase_changed = current_info["phase"] != last_info.get("phase")
+        time_changed = current_info["released_time"] != last_info.get("released_time")
 
-            f.write("\n")  # Разделитель между месяцами
+        if phase_changed or time_changed:
+            product_history[url] = current_info  # Обновляем историю
+
+            # Формируем сообщение
+            message = (
+                f"🔄 *Изменение статуса!*\n"
+                f"• Товар: {url}\n"
+                f"• Новый статус: `{current_info['phase']}`\n"
+                f"• Новое время: `{current_info['released_time']}`\n"
+                f"• Предыдущий статус: `{last_info.get('phase', 'неизвестно')}`\n"
+                f"• Предыдущее время: `{last_info.get('released_time', 'неизвестно')}`"
+            )
+            send_telegram_notification(message)
+            print(f"📢 Отправлено уведомление для {url}")
+
+
+def run_scheduler():
+    """Запускает проверку каждые 4 часа."""
+    print("🔄 Скрипт запущен. Ожидание изменений...")
+    schedule.every(4).hours.do(check_products)
+
+    while True:
+        schedule.run_pending()
+        time.sleep(60)  # Проверка каждую минуту
 
 
 if __name__ == "__main__":
-    main()
+    check_products()  # Первая проверка сразу
+    run_scheduler()
