@@ -89,7 +89,7 @@ def parse_product_info(url):
 
 def check_products():
     """Основная функция проверки изменений."""
-    print(f"\n🔍 Проверка {datetime.now().strftime('%d.%m %H:%M')}")
+    print(f"\n🔍 Проверка {datetime.now().strftime('%d.%m %H:%M:%S')}")
 
     for url in input_data:
         current_info = parse_product_info(url)
@@ -105,6 +105,11 @@ def check_products():
 
         if phase_changed or time_changed:
             product_history[url] = current_info  # Обновляем историю
+            print(f"Изменение обнаружено!")
+
+            # Если первый запуск - пускать нотификацию не надо.
+            if last_info == {}:
+                continue
 
             # Формируем сообщение
             message = (
@@ -118,11 +123,13 @@ def check_products():
             send_telegram_notification(message)
             print(f"📢 Отправлено уведомление для {url}")
 
+    print(f"Проверка закончена.")
+
 
 def run_scheduler():
     """Запускает проверку каждые 4 часа."""
     print("🔄 Скрипт запущен. Ожидание изменений...")
-    schedule.every(4).hours.do(check_products)
+    schedule.every(6).hours.do(check_products)
 
     while True:
         schedule.run_pending()
