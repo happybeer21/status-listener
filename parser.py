@@ -1,6 +1,6 @@
 import argparse
+import json
 import os
-import re
 import time
 from datetime import datetime
 
@@ -14,9 +14,23 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+HISTORY_FILE = "history.json"  # Файл для сохранения истории
 
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
     raise ValueError("TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID не заданы!")
+
+# --- Загрузка и сохранение истории ---
+def load_history():
+    """Загружает историю из файла."""
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_history(data):
+    """Сохраняет историю в файл."""
+    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
 # Загрузка директории и имени файла
 def parse_args():
@@ -40,7 +54,7 @@ def read_input_file():
 input_data = read_input_file()
 
 # Словарь для хранения последних состояний {url: last_phase}
-product_history = {}
+product_history = load_history()
 
 # Отправляем нотификацию мне в ЛС
 def send_telegram_notification(message):
@@ -80,7 +94,8 @@ def parse_product_info(url):
 
         return {
             "phase": phase_text,
-            "released_time": released_time_text
+            "released_time": released_time_text,
+            "last_checked": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
     except Exception as e:
         print(f"⚠ Ошибка при парсинге {url}: {str(e)}")
@@ -123,6 +138,7 @@ def check_products():
             send_telegram_notification(message)
             print(f"📢 Отправлено уведомление для {url}")
 
+    save_history(product_history)
     print(f"Проверка закончена.")
 
 
