@@ -16,6 +16,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 HISTORY_FILE = "history.json"  # Файл для сохранения истории
 
+# Если беда с токенами ТГ, то крашимся
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
     raise ValueError("TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID не заданы!")
 
@@ -43,7 +44,7 @@ def parse_args():
 args = parse_args()
 input_path = f"{args.dir}/{args.file}"
 
-# --- Чтение файла ---
+# Читаем файл со ссылочками на фигурки
 def read_input_file():
     # Читаем ссылки из файла (одна строка — одна ссылка)
     with open(input_path, "r", encoding="utf-8") as file:
@@ -53,7 +54,7 @@ def read_input_file():
 
 input_data = read_input_file()
 
-# Словарь для хранения последних состояний {url: last_phase}
+# Словарь для хранения последних состояний
 product_history = load_history()
 
 # Отправляем нотификацию мне в ЛС
@@ -69,6 +70,43 @@ def send_telegram_notification(message):
     response = requests.post(url, json=payload)
     if response.status_code != 200:
         print(f"Telegram response status code: {response.status_code}, Reason: {response.text}")
+
+
+def parse_description_block(description_block):
+    """Универсальный парсер для блока описания"""
+    description_data = {}
+
+    if not description_block:
+        return description_data
+
+    description_elements = description_block.find_all(string=True, recursive=True)
+    # Ищем все элементы с текстом (рекурсивно, включая вложенные теги)
+    for element in description_elements:
+        # Пропускаем пустые строки и текст из пустых тегов
+        if not element.strip() or (element.parent and not element.parent.get_text(strip=True)):
+            continue
+
+        text = element.strip()
+
+        # Обрабатываем только строки с ":" (ключ-значение)
+        if ":" in text:
+            # Разделяем по первому ":", оставляя остальные в значении
+            key, value = text.split(":", 1)
+            key = key.strip()
+            value = value.strip()
+
+            # Объединяем дубликаты ключей (если есть)
+            if key in description_data:
+                description_data[key] += f"; {value}"  # или другой разделитель
+            else:
+                description_data[key] = value
+        else:
+            # Для текста без ":" сохраняем с общим ключом "Note"
+            if "Note" not in description_data:
+                description_data["Note"] = []
+            description_data["Note"].append(text)
+
+    return description_data
 
 # Получаем инфо по фигурке.
 def parse_product_info(url):
@@ -92,9 +130,14 @@ def parse_product_info(url):
         else:
             released_time_text = None
 
+        # Парсим блок с описанием
+        description_block = soup.find("div", id="tab-description")
+        description_data = parse_description_block(description_block)
+
         return {
             "phase": phase_text,
             "released_time": released_time_text,
+            "description": description_data,
             "last_checked": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
     except Exception as e:
@@ -118,7 +161,17 @@ def check_products():
         phase_changed = current_info["phase"] != last_info.get("phase")
         time_changed = current_info["released_time"] != last_info.get("released_time")
 
-        if phase_changed or time_changed:
+        # Проверяем изменения в описании
+        description_changes = {}
+        if "description" in current_info:
+            for key, value in current_info["description"].items():
+                if key not in last_info.get("description", {}) or last_info["description"][key] != value:
+                    description_changes[key] = {
+                        "old": last_info.get("description", {}).get(key, "неизвестно"),
+                        "new": value
+                    }
+
+        if phase_changed or time_changed or description_changes:
             product_history[url] = current_info  # Обновляем историю
             print(f"Изменение обнаружено!")
 
@@ -127,14 +180,27 @@ def check_products():
                 continue
 
             # Формируем сообщение
-            message = (
-                f"🔄 *Изменение статуса!*\n"
-                f"• Товар: {url}\n"
-                f"• Новый статус: `{current_info['phase']}`\n"
-                f"• Новое время: `{current_info['released_time']}`\n"
-                f"• Предыдущий статус: `{last_info.get('phase', 'неизвестно')}`\n"
-                f"• Предыдущее время: `{last_info.get('released_time', 'неизвестно')}`"
-            )
+            message_parts = [
+                f"🔄 *Изменение статуса!*",
+                f"• Товар: {url}"
+            ]
+
+            if phase_changed:
+                message_parts.append(
+                    f"• Статус: `{last_info.get('phase', 'неизвестно')}` → `{current_info['phase']}`"
+                )
+
+            if time_changed:
+                message_parts.append(
+                    f"• Время выхода: `{last_info.get('released_time', 'неизвестно')}` → `{current_info['released_time']}`"
+                )
+
+            for key, change in description_changes.items():
+                message_parts.append(
+                    f"• {key}: `{change['old']}` → `{change['new']}`"
+                )
+
+            message = "\n".join(message_parts)
             send_telegram_notification(message)
             print(f"📢 Отправлено уведомление для {url}")
 
@@ -143,7 +209,6 @@ def check_products():
 
 
 def run_scheduler():
-    """Запускает проверку каждые 4 часа."""
     print("🔄 Скрипт запущен. Ожидание изменений...")
     schedule.every(6).hours.do(check_products)
 
